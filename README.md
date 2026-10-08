@@ -12,7 +12,7 @@ and there are no API keys.
 Apple Silicon Mac, macOS 14 or later.
 
 ```bash
-curl -fsSL https://main.d2midh14st6hm.amplifyapp.com/install.sh | bash
+curl -fsSL https://larmor.dev/install.sh | bash
 ```
 
 That sets up a Python environment, a menu-bar app that starts at login, and the MCP server, skill
