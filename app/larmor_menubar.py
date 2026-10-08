@@ -23,6 +23,8 @@ PORT = int(os.getenv("LARMOR_ENGINE_PORT", "8160"))
 HEALTH = f"http://127.0.0.1:{PORT}/health"
 HOME = Path.home() / ".larmor"
 ENGINE_LOG = HOME / "engine.log"
+# Only ever used when the user presses Send in "Send feedback…"
+SIGNUP_URL = os.getenv("LARMOR_SIGNUP_URL", "https://2htivf76db7g5cbqk2zaq4r25a0vcnxj.lambda-url.ap-south-1.on.aws/")
 
 # SF Symbols, drawn as template images so they follow light/dark menu bars.
 # Not a record dot: a mic app showing one reads as "always recording".
@@ -115,6 +117,7 @@ class App(rumps.App):
         self.status = rumps.MenuItem("Starting engine…")
         self.toggle = rumps.MenuItem("Stop engine", callback=self.on_toggle)
         self.menu = [self.status, None, self.toggle,
+                     rumps.MenuItem("Send feedback…", callback=self.on_feedback),
                      rumps.MenuItem("Open engine log", callback=self.on_log),
                      None, rumps.MenuItem("Quit Larmor", callback=self.on_quit)]
         self.was_ready = None
@@ -152,6 +155,27 @@ class App(rumps.App):
         else:
             self.engine.start()
         self.refresh()
+
+    def on_feedback(self, _):
+        """The user writes it and presses Send; nothing is sent otherwise."""
+        w = rumps.Window(message="What's working, what isn't? It goes straight to the person building Larmor.",
+                         title="Send feedback", default_text="", ok="Send", cancel="Cancel",
+                         dimensions=(360, 140))
+        r = w.run()
+        text = (r.text or "").strip()
+        if not r.clicked or not text:
+            return
+        try:
+            email = (HOME / "email").read_text().strip()
+        except OSError:
+            email = ""
+        body = json.dumps({"kind": "feedback", "message": text, "email": email, "version": "beta"}).encode()
+        try:
+            req = urllib.request.Request(SIGNUP_URL, data=body, headers={"content-type": "application/json"})
+            urllib.request.urlopen(req, timeout=8).read()
+            rumps.alert("Thank you", "Got it.")
+        except Exception as e:  # noqa: BLE001
+            rumps.alert("Couldn't send", f"Check your connection and try again. ({e})")
 
     def on_log(self, _):
         ENGINE_LOG.touch()

@@ -18,6 +18,9 @@ PY="$VENV/bin/python"
 SERVER="$DIR/larmor_server.py"
 SKILL="$DIR/skills/larmor/SKILL.md"
 LABEL="dev.larmor.menubar"
+# The only thing Larmor ever sends anywhere, and only if the user types it: an email
+# for updates, and feedback from the menu bar. No usage data, no audio, no transcripts.
+SIGNUP_URL="${LARMOR_SIGNUP_URL:-https://2htivf76db7g5cbqk2zaq4r25a0vcnxj.lambda-url.ap-south-1.on.aws/}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 say() { printf '%s\n' "$*"; }
@@ -199,6 +202,29 @@ if [ "$target" != --no-agents ]; then
   esac
 fi
 
+ask_email() {
+  # curl | bash: stdin is the script, so ask on the terminal itself; skip if there isn't one
+  [ -f "$HOME/.larmor/email" ] && return
+  [ -r /dev/tty ] && [ -w /dev/tty ] || return 0
+  local email=""
+  printf '\nWant an email when Larmor gets better? It is the only thing we would ever have.\nEmail (optional, press Enter to skip): ' > /dev/tty
+  IFS= read -r email < /dev/tty || return 0
+  [ -n "$email" ] || return 0
+  printf '%s\n' "$email" > "$HOME/.larmor/email"
+  "$PY" - "$SIGNUP_URL" "$email" <<'PYEOF' > /dev/tty 2>&1 || true
+import json, sys, urllib.request
+url, email = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(url, data=json.dumps({"kind": "email", "email": email, "version": "beta"}).encode(),
+                             headers={"content-type": "application/json"})
+try:
+    urllib.request.urlopen(req, timeout=6).read()
+    print("  thanks, you're on the list")
+except Exception as e:
+    print("  couldn't reach the server, skipped (" + (getattr(e, "reason", None) or str(e))[:60] + ")")
+PYEOF
+}
+ask_email
+
 cat <<EOF
 
 Done. A waveform icon is now in your menu bar.
@@ -208,4 +234,5 @@ Done. A waveform icon is now in your menu bar.
   • The first time, macOS asks your terminal for microphone access. Allow it.
   • Use headphones or speakers, either works: you can talk over it and it stops.
   • Can't see the icon? A full menu bar hides it. Hold ⌘ and drag other icons out.
+  • Something off, or something you love? Menu bar icon → Send feedback.
 EOF
