@@ -30,6 +30,9 @@ TURNS.touch()
 SESSION = HOME / "session"          # voice mode on/off + who owns the mic; read by the hooks
 METRICS = HOME / "metrics.jsonl"
 EAR_INFO = HOME / "ear.json"
+# Newest turn already handed to the agent, by listen() or by the heard hook (which
+# delivers speech mid-work at tool boundaries). Shared so nothing arrives twice.
+DELIVERED = HOME / "delivered_until"
 EAR_LOG = HOME / "ear.log"
 EAR_SCRIPT = str(Path(__file__).resolve().parent / "larmor_ear.py")
 ENGINE = os.getenv("LARMOR_ENGINE_URL", "http://127.0.0.1:8160")
@@ -89,6 +92,20 @@ def _touch(field: str) -> None:
 
 # ── turns ─────────────────────────────────────────────────────────────────────
 
+def _delivered() -> float:
+    try:
+        return float(DELIVERED.read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _mark_delivered(t: float) -> None:
+    if t > _delivered():
+        tmp = HOME / "delivered_until.tmp"
+        tmp.write_text(repr(t))
+        tmp.replace(DELIVERED)
+
+
 def _skip_turns() -> None:
     """Fast-forward past anything unread: those words were said to another agent."""
     if _state["cursor"] is None:
@@ -100,13 +117,14 @@ def _drain() -> list[dict]:
     if _state["cursor"] is None:
         _skip_turns()
     out = []
+    done = _delivered()
     while line := _state["cursor"].readline():
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
         text = (ev.get("text") or "").strip()
-        if ev.get("type") != "turn" or not text:
+        if ev.get("type") != "turn" or not text or float(ev.get("wall_clock") or 0) <= done:
             continue
         if ev.get("interrupted_agent"):
             text = "(you were cut off mid-sentence) " + text
@@ -136,14 +154,20 @@ def listen(timeout_s: float = 300.0) -> str:
         _state["buffered"].clear()
         _skip_turns()
     _touch("last_listen")
-    _state["buffered"].extend(_drain())
     deadline = t_call + timeout_s
-    while not _state["buffered"] and time.time() < deadline:
-        time.sleep(POLL_S)
+    turns: list[dict] = []
+    while True:
         _state["buffered"].extend(_drain())
-    if not _state["buffered"]:
+        # the heard hook may have delivered some of these mid-work after we buffered them
+        done = _delivered()
+        turns = [t for t in _state["buffered"] if t["t_user_end"] > done]
+        _state["buffered"] = []
+        if turns or time.time() >= deadline:
+            break
+        time.sleep(POLL_S)
+    if not turns:
         return "(silence)"
-    turns, _state["buffered"] = _state["buffered"], []
+    _mark_delivered(max(t["t_user_end"] for t in turns))
     t_ret = time.time()
     for t in turns:
         _metric("listen_turn", total_ms=round((t_ret - t["t_user_end"]) * 1000, 1),

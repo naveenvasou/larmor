@@ -80,6 +80,13 @@ When a request needs real work (reading files, editing, running things):
    Splitting one reply across several `speak()` calls is the trap — each extra call is another
    window where the user is talking to nobody. **Prefer one well-composed line, then listen.**
 
+## Speech that arrives mid-work
+
+In Claude Code, what the user says while you're working doesn't wait for `listen()`. After your
+next tool call it arrives as added context starting with **[Larmor] While you were working, the
+user said**. Treat it exactly like a turn from `listen()`: `speak()` a short acknowledgement and
+act on it. It will not be returned by `listen()` again.
+
 ## Interruptions
 
 If `listen` returns something that contradicts or redirects your current work — "stop", "no, the

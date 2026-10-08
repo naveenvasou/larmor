@@ -124,6 +124,12 @@ if not any("larmor_claim_hook" in json.dumps(m) for m in ptu):
                 "hooks": [{"type": "command", "command": f"{py} {d}/hooks/larmor_claim_hook.py"}]})
     json.dump(c, open(p, "w"), indent=2)
     print("  claude: session-scoping hook registered")
+# after every tool call: hand the agent anything the user said while it worked
+if not any("larmor_heard_hook" in json.dumps(m) for m in ptu):
+    ptu.append({"hooks": [{"type": "command", "command": f"{py} {d}/hooks/larmor_heard_hook.py",
+                           "timeout": 5}]})
+    json.dump(c, open(p, "w"), indent=2)
+    print("  claude: mid-work speech hook registered")
 PYEOF
 }
 

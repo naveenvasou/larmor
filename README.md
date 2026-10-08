@@ -30,6 +30,8 @@ The first time, macOS asks your terminal for microphone access.
   and not the agent.
 - **Interruptions:** your voice pauses playback at once. Keep talking, or say something real like
   "stop", and it stops. A backchannel like "mm-hmm" resumes the sentence.
+- **Talk while it works:** in Claude Code, what you say mid-task reaches the agent after its next
+  tool call, usually within seconds, instead of waiting for it to finish.
 - **One session at a time:** voice mode belongs to the session that turned it on. Your other
   terminals behave normally.
 
