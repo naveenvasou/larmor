@@ -12,7 +12,7 @@ and there are no API keys.
 Apple Silicon Mac, macOS 14 or later.
 
 ```bash
-git clone https://github.com/naveenvasou/larmor ~/larmor && ~/larmor/install.sh
+curl -fsSL https://main.d2midh14st6hm.amplifyapp.com/install.sh | bash
 ```
 
 That sets up a Python environment, a menu-bar app that starts at login, and the MCP server, skill
@@ -38,7 +38,7 @@ The first time, macOS asks your terminal for microphone access.
 ## Uninstall
 
 ```bash
-~/larmor/install.sh --uninstall      # stops the app and removes the login item
+~/.larmor/app/install.sh --uninstall   # stops the app and removes the login item
 claude mcp remove larmor -s user
 ```
 
