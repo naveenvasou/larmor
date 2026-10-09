@@ -4,7 +4,7 @@
 Without this, speech during work waits in the buffer until the agent next calls
 listen(), which can be minutes into a long task. The user says "no, the other
 file" and the agent keeps editing the wrong one. Claude Code runs this hook after
-every tool call, so turns reach the agent at the next tool boundary, usually
+every tool call (so does Codex, with the same hook format), so turns reach the agent at the next tool boundary, usually
 within seconds, as added context on that tool's result.
 
 Delivered turns are marked in ~/.larmor/delivered_until so listen() never
@@ -23,6 +23,7 @@ SESSION = os.path.join(HOME, "session")
 TURNS = os.path.join(HOME, "turns.jsonl")
 DELIVERED = os.path.join(HOME, "delivered_until")
 TAIL_BYTES = 256 * 1024
+_SAID = []
 
 
 def _float(path: str) -> float:
@@ -62,6 +63,7 @@ def main() -> int:
         f.write(repr(newest))
     os.replace(tmp, DELIVERED)
     quoted = "\n".join(f'  "{t}"' for t in said)
+    _SAID.append(1)
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PostToolUse",
         "additionalContext": (
@@ -74,6 +76,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        rc = main()
     except Exception:
-        sys.exit(0)
+        rc = 0
+    if rc == 0 and not _SAID:
+        print("{}")                   # Codex wants JSON on stdout even when there's nothing to add
+    sys.exit(rc)

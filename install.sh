@@ -2,10 +2,10 @@
 # Larmor — talk to your terminal coding agent. One command sets up everything:
 #
 #   ./install.sh                 # runtime + menu-bar app + every agent it finds
-#   ./install.sh claude          # same, but only wire Claude Code (or gemini|antigravity|codex)
+#   ./install.sh claude          # same, but only wire Claude Code (or codex|gemini|antigravity)
 #   ./install.sh --no-agents     # runtime + menu-bar app, leave agent configs alone
 #   ./install.sh --uninstall     # stop the app and remove the login item (agent configs stay)
-#   ./install.sh --print         # show the MCP config, install nothing
+#   ./install.sh --print         # the MCP config, for any other agent; installs nothing
 #
 # Everything runs on your Mac: Parakeet for speech-to-text, Chatterbox for the voice,
 # Apple's echo canceller so you can talk over it. Apple Silicon only. The first launch
@@ -99,11 +99,30 @@ EOF
 
 # ── runtime ───────────────────────────────────────────────────────────────────
 
+# What Larmor needs, checked up front so nobody finds out halfway through.
+# Measured: the engine holds about 2-3 GB of memory with both models loaded; the models
+# are about 3.7 GB on disk and the Python environment about 0.8 GB.
 check_mac() {
-  [ "$(uname -s)" = Darwin ] || die "Larmor runs on macOS only"
-  [ "$(uname -m)" = arm64 ] || die "Larmor needs an Apple Silicon Mac (M1 or later)"
-  local major; major="$(sw_vers -productVersion | cut -d. -f1)"
-  [ "$major" -ge 14 ] || die "Larmor needs macOS 14 or later"
+  [ "$(uname -s)" = Darwin ] || die "Larmor runs on macOS only."
+  local chip os major mem_gb free_gb
+  chip="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo Mac)"
+  os="$(sw_vers -productVersion)"; major="${os%%.*}"
+  mem_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+  free_gb=$(( $(df -k "$HOME" | awk 'NR==2 {print $4}') / 1048576 ))
+  printf '  %sWhat Larmor needs%s\n' "$B" "$X"
+  [ "$(uname -m)" = arm64 ] || die "Larmor needs an Apple Silicon Mac (M1 or later). This one is $chip."
+  [ "$major" -ge 14 ] || die "Larmor needs macOS 14 or later. This Mac has $os."
+  ok "$(printf '%-30s' "$chip, macOS $os")" "Apple Silicon, macOS 14 or later"
+  if [ "$mem_gb" -lt 8 ]; then
+    die "Larmor needs at least 8 GB of memory. This Mac has $mem_gb GB."
+  elif [ "$mem_gb" -lt 16 ]; then
+    ok "$(printf '%-30s' "$mem_gb GB memory")" "uses about 3 GB while it runs (tight on $mem_gb GB; 16 GB is comfortable)"
+  else
+    ok "$(printf '%-30s' "$mem_gb GB memory")" "uses about 3 GB while it runs"
+  fi
+  [ "$free_gb" -ge 6 ] || die "Larmor needs about 5 GB of disk for its voice models. This Mac has $free_gb GB free."
+  ok "$(printf '%-30s' "$free_gb GB free disk")" "needs about 5 GB for the voice models"
+  printf '\n'
 }
 
 install_uv() {
@@ -137,8 +156,19 @@ install_app() {
 </dict>
 </plist>
 EOF
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  local dom="gui/$(id -u)" i
+  launchctl bootout "$dom/$LABEL" 2>/dev/null || true
+  # bootout returns before launchd has let go of the job, and bootstrapping again too
+  # soon fails with "5: Input/output error". That broke every re-install.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl print "$dom/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  for i in 1 2 3; do
+    launchctl bootstrap "$dom" "$PLIST" && return 0
+    sleep 1
+  done
+  return 1
 }
 
 uninstall() {
@@ -150,47 +180,50 @@ uninstall() {
 }
 
 # ── agents ────────────────────────────────────────────────────────────────────
+# Every agent gets the MCP server (the voice tools, plus the speaking rules it sends on
+# connect) and the larmor skill. Agents with Claude-style hooks (Claude Code, Codex) also
+# get the Stop and mid-work hooks. Anything else that speaks MCP works from --print.
 
-install_claude() {
-  command -v claude >/dev/null || { say "  claude: not found, skipping"; return; }
-  claude mcp remove larmor -s user >/dev/null 2>&1 || true
-  claude mcp add larmor -s user -- "$PY" "$SERVER" >/dev/null
-  say "  claude: MCP server registered"
-  mkdir -p ~/.claude/skills/larmor
-  cp "$SKILL" ~/.claude/skills/larmor/SKILL.md
-  say "  claude: /larmor skill installed"
-  # The Stop hook keeps a turn from ending while voice mode is on (Claude-specific)
-  "$PY" - "$PY" "$DIR" <<'PYEOF'
+AGENTS_SKILLS="$HOME/.agents/skills"   # the shared skills folder Codex and Gemini CLI read
+
+has_claude()      { command -v claude >/dev/null; }
+has_codex()       { command -v codex >/dev/null; }
+has_gemini()      { command -v gemini >/dev/null; }
+has_antigravity() { command -v agy >/dev/null || [ -d ~/.gemini/antigravity-cli ] || [ -d ~/.gemini/config ]; }
+
+put_skill() {  # skills-dir
+  mkdir -p "$1/larmor"
+  cp "$SKILL" "$1/larmor/SKILL.md"
+}
+
+# Claude Code and Codex read the same hook format, so one merge serves both files.
+_hooks() {  # settings-file
+  "$PY" - "$1" "$PY" "$DIR" <<'PYEOF'
 import json, os, sys
-py, d = sys.argv[1], sys.argv[2]
-p = os.path.expanduser("~/.claude/settings.json")
+p, py, d = sys.argv[1:]
+p = os.path.expanduser(p)
 try: c = json.load(open(p))
 except Exception: c = {}
-st = c.setdefault("hooks", {}).setdefault("Stop", [])
-cmd = f"{py} {d}/hooks/larmor_stop_hook.py"
-if any("larmor_stop_hook" in json.dumps(m) for m in st):
-    print("  claude: Stop hook already registered")
-else:
-    st.append({"hooks": [{"type": "command", "command": cmd}]})
-    json.dump(c, open(p, "w"), indent=2)
-    print("  claude: Stop hook registered")
+h = c.setdefault("hooks", {})
+def add(event, name, entry):
+    lst = h.setdefault(event, [])
+    lst[:] = [m for m in lst if name not in json.dumps(m)]     # replace, so paths stay current
+    lst.append(entry)
+cmd = lambda f: f"{py} {d}/hooks/{f}"
+# a turn can't end while voice mode is on
+add("Stop", "larmor_stop_hook", {"hooks": [{"type": "command", "command": cmd("larmor_stop_hook.py")}]})
 # start_voice -> record which session turned voice on, so only that one is held to it
-ptu = c["hooks"].setdefault("PostToolUse", [])
-if not any("larmor_claim_hook" in json.dumps(m) for m in ptu):
-    ptu.append({"matcher": "mcp__larmor__start_voice",
-                "hooks": [{"type": "command", "command": f"{py} {d}/hooks/larmor_claim_hook.py"}]})
-    json.dump(c, open(p, "w"), indent=2)
-    print("  claude: session-scoping hook registered")
+add("PostToolUse", "larmor_claim_hook", {"matcher": "mcp__larmor__start_voice",
+    "hooks": [{"type": "command", "command": cmd("larmor_claim_hook.py")}]})
 # after every tool call: hand the agent anything the user said while it worked
-if not any("larmor_heard_hook" in json.dumps(m) for m in ptu):
-    ptu.append({"hooks": [{"type": "command", "command": f"{py} {d}/hooks/larmor_heard_hook.py",
-                           "timeout": 5}]})
-    json.dump(c, open(p, "w"), indent=2)
-    print("  claude: mid-work speech hook registered")
+add("PostToolUse", "larmor_heard_hook", {
+    "hooks": [{"type": "command", "command": cmd("larmor_heard_hook.py"), "timeout": 5}]})
+os.makedirs(os.path.dirname(p), exist_ok=True)
+json.dump(c, open(p, "w"), indent=2)
 PYEOF
 }
 
-_json_mcp() {  # file  label
+_json_mcp() {  # file
   "$PY" - "$1" "$PY" "$SERVER" <<'PYEOF'
 import json, os, sys
 p, py, server = sys.argv[1:]
@@ -203,35 +236,57 @@ json.dump(c, open(p, "w"), indent=2)
 PYEOF
 }
 
-install_gemini() {
-  command -v gemini >/dev/null || { say "  gemini: not found, skipping"; return; }
-  _json_mcp ~/.gemini/settings.json
-  say "  gemini: MCP server added; paste skills/larmor/SKILL.md into GEMINI.md for the speaking rules"
-}
-
-install_antigravity() {
-  command -v agy >/dev/null || [ -d ~/.gemini/config ] || { say "  antigravity: not found, skipping"; return; }
-  _json_mcp ~/.gemini/config/mcp_config.json
-  mkdir -p ~/.gemini/skills/larmor
-  cp "$SKILL" ~/.gemini/skills/larmor/SKILL.md
-  say "  antigravity: MCP server + skill installed"
+install_claude() {
+  has_claude || { say "Claude Code: not found, skipping"; return; }
+  claude mcp remove larmor -s user >/dev/null 2>&1 || true
+  claude mcp add larmor -s user -- "$PY" "$SERVER" >/dev/null
+  put_skill ~/.claude/skills
+  _hooks ~/.claude/settings.json
+  say "Claude Code: voice tools, /larmor skill, hooks"
 }
 
 install_codex() {
-  command -v codex >/dev/null || { say "  codex: not found, skipping"; return; }
+  has_codex || { say "Codex: not found, skipping"; return; }
   local f=~/.codex/config.toml
-  mkdir -p ~/.codex
-  if grep -q "mcp_servers.larmor" "$f" 2>/dev/null; then
-    say "  codex: already configured"
-  else
-    cat >> "$f" <<EOF
+  mkdir -p ~/.codex; touch "$f"
+  [ -f "$f.bak-larmor" ] || cp "$f" "$f.bak-larmor"
+  # Rewrite our block each time. listen() waits up to five minutes for the user to talk,
+  # and Codex gives up on a tool after 60 seconds unless told otherwise. Its tools are
+  # pre-approved: an approval prompt on every speak() and listen() would end the conversation.
+  "$PY" - "$f" "$PY" "$SERVER" <<'PYEOF'
+import sys
+p, py, server = sys.argv[1:]
+out, skip = [], False
+for line in open(p).read().splitlines():
+    s = line.strip()
+    if s.startswith("["):
+        skip = s == "[mcp_servers.larmor]" or s.startswith("[mcp_servers.larmor.")
+    if not skip:
+        out.append(line)
+while out and not out[-1].strip():
+    out.pop()
+out += ["", "[mcp_servers.larmor]", f'command = "{py}"', f'args = ["{server}"]', "tool_timeout_sec = 900",
+        'default_tools_approval_mode = "approve"', ""]
+open(p, "w").write("\n".join(out))
+PYEOF
+  put_skill "$AGENTS_SKILLS"
+  _hooks ~/.codex/hooks.json
+  say "Codex: voice tools, \$larmor skill, hooks (trust them once with /hooks)"
+}
 
-[mcp_servers.larmor]
-command = "$PY"
-args = ["$SERVER"]
-EOF
-    say "  codex: MCP server added; paste skills/larmor/SKILL.md into AGENTS.md for the speaking rules"
-  fi
+install_gemini() {
+  has_gemini || { say "Gemini CLI: not found, skipping"; return; }
+  _json_mcp ~/.gemini/settings.json
+  put_skill "$AGENTS_SKILLS"
+  say "Gemini CLI: voice tools, larmor skill"
+}
+
+install_antigravity() {
+  has_antigravity || { say "Antigravity: not found, skipping"; return; }
+  _json_mcp ~/.gemini/config/mcp_config.json
+  [ -d ~/.gemini/antigravity-cli ] && _json_mcp ~/.gemini/antigravity-cli/mcp_config.json
+  put_skill ~/.gemini/skills
+  say "Antigravity: voice tools, larmor skill"
 }
 
 # ── email ─────────────────────────────────────────────────────────────────────
@@ -291,18 +346,30 @@ get_email() {
 
 wire_agents() {
   case "$target" in
-    all) install_claude; install_gemini; install_antigravity; install_codex ;;
+    all) install_claude; install_codex; install_gemini; install_antigravity ;;
     *)   "install_$target" ;;
   esac
 }
 
 finish() {
+  local n=0
   printf '\n  %sLarmor is installed.%s\n\n' "$B" "$X"
   printf '  %s1%s  The menu-bar icon is fetching the voice models (about 3.7 GB, first time\n' "$E" "$X"
   printf '     only). When it turns into a plain waveform, you'\''re ready.\n'
-  printf '  %s2%s  Restart Claude Code and type %s/larmor%s. Other agents: ask for "voice mode".\n' "$E" "$X" "$B" "$X"
+  printf '  %s2%s  Open a new session in your agent and start voice mode:\n' "$E" "$X"
+  if has_claude; then printf '       %-13s %s/larmor%s\n' "Claude Code" "$B" "$X"; n=1; fi
+  if has_codex; then printf '       %-13s %s$larmor%s\n' "Codex" "$B" "$X"; n=1; fi
+  if has_gemini; then printf '       %-13s say "voice mode"\n' "Gemini CLI"; n=1; fi
+  if has_antigravity; then printf '       %-13s say "voice mode"\n' "Antigravity"; n=1; fi
+  if [ "$n" = 1 ]; then
+    printf '       %sAny other agent with MCP: add the output of%s\n' "$D" "$X"
+  else
+    printf '       %sFor any agent with MCP, add the output of%s\n' "$D" "$X"
+  fi
+  printf '       %s~/.larmor/app/install.sh --print to its MCP settings, then say "voice mode".%s\n' "$D" "$X"
   printf '  %s3%s  When macOS asks for microphone access for your terminal, allow it.\n\n' "$E" "$X"
   printf '  %sHeadphones or speakers both work, and you can talk over it.%s\n' "$D" "$X"
+  if has_codex; then printf '  %sIn Codex, run /hooks once and trust Larmor'\''s hooks.%s\n' "$D" "$X"; fi
   printf '  %sNo icon? A full menu bar hides it: hold ⌘ and drag other icons away.%s\n' "$D" "$X"
   printf '  %sSomething off? Menu-bar icon → Send feedback.%s\n\n' "$D" "$X"
 }
@@ -320,6 +387,7 @@ main() {
   banner
   check_mac
   get_email
+  printf '\n  %sInstalling%s\n' "$B" "$X"
   if [ -n "${LARMOR_FETCHED:-}" ]; then ok "Downloaded Larmor" "$LARMOR_FETCHED"; fi
   if ! command -v uv >/dev/null; then
     step "Installing uv, the Python package manager" install_uv

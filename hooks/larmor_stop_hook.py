@@ -44,6 +44,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        rc = main()
     except Exception:
-        sys.exit(0)                    # fail open, always
+        rc = 0                         # fail open, always
+    if rc == 0:
+        print("{}")                    # Codex wants JSON on stdout when a Stop hook exits 0
+    sys.exit(rc)

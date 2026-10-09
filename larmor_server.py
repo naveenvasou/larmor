@@ -43,7 +43,27 @@ POLL_S = 0.02                       # 20 ms: the transport should never be the b
 # owner renews it on every listen(); a stale lease is free for the taking.
 LEASE_S = float(os.getenv("LARMOR_LEASE_S", "90"))
 
-mcp = MCPServer("larmor")
+# Sent to every MCP client at connect, so any agent gets the speaking rules even where
+# the larmor skill isn't installed. The skill (skills/larmor/SKILL.md) is the long form.
+INSTRUCTIONS = """\
+Larmor lets the user talk with you by voice. None of this applies until they ask for voice
+mode (or type /larmor or $larmor). Then:
+
+- Call start_voice() once. Loop: speak(reply) -> listen() -> work -> speak(reply) -> listen().
+  Never end your turn without calling listen(). Call end_voice() only when they say they're done.
+  On "(silence)", just listen() again.
+- Speak 1-3 short sentences per speak() call. Lead with the answer. Never speak markdown, code,
+  file paths or URLs; put detail on the terminal and say one line about it. Round numbers.
+- Before your first tool call on any real work, speak a short receipt ("one sec, checking the
+  config"). During long work, speak a short progress beat at each milestone.
+- What the user says while you work comes back in the result of your next speak() call (and,
+  in agents with Larmor's hooks, after your next tool call). Treat it as their turn: acknowledge
+  it and change course if it redirects you. It will not come through listen() again.
+- If listen() says you were cut off, open with a couple of words owning it, then answer.
+- Don't write on-screen summaries of what you just said aloud. Your reply is the speak() call.
+"""
+
+mcp = MCPServer("larmor", instructions=INSTRUCTIONS)
 OWNER = os.getpid()                 # each agent spawns its own server, so the pid identifies it
 _state = {"cursor": None, "buffered": [], "was_away": False}
 _ear = {"proc": None}
@@ -225,7 +245,38 @@ def speak(text: str) -> str:
     except Exception as e:  # noqa: BLE001
         return f"speak failed: {e}"
     _touch("last_speak")
-    return f"queued ({r.json().get('queued', '?')} ahead)"
+    return f"queued ({r.json().get('queued', '?')} ahead)" + _heard_while_working()
+
+
+def _heard_while_working() -> str:
+    """Anything the user finished saying since the agent last heard them.
+
+    This is how speech reaches the agent mid-work in every MCP client: agents narrate
+    long work with speak(), so a turn arrives within one progress beat. Claude Code and
+    Codex also get it sooner through the heard hook; both mark delivered_until, so a
+    turn only ever arrives once.
+    """
+    if _state["was_away"] or not _owns_mic():
+        return ""                                # listen() resyncs when we regain the mic
+    _state["buffered"].extend(_drain())
+    done = _delivered()
+    turns = [t for t in _state["buffered"] if t["t_user_end"] > done]
+    _state["buffered"] = []
+    if not turns:
+        return ""
+    _mark_delivered(max(t["t_user_end"] for t in turns))
+    _metric("heard_on_speak", n=len(turns))
+    quoted = "\n".join(f'  "{t["text"]}"' for t in turns)
+    return ("\n\n[Larmor] While you were working, the user said (by voice):\n" + quoted + "\n"
+            "This will NOT come through listen(). Act on it now: acknowledge it with speak(), "
+            "and change course if it redirects your work.")
+
+
+@mcp.prompt()
+def larmor() -> str:
+    """Start voice mode: talk with your coding agent through Larmor."""
+    return ("Start Larmor voice mode now: call the larmor start_voice tool, greet me in one short "
+            "spoken line with speak(), then listen(). Follow the Larmor speaking rules until I end it.")
 
 
 @mcp.tool()

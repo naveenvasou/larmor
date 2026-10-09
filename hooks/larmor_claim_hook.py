@@ -13,6 +13,7 @@ import os
 import sys
 
 SESSION = os.path.expanduser("~/.larmor/session")
+_SAID = []
 
 
 def main() -> int:
@@ -34,6 +35,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        rc = main()
     except Exception:
-        sys.exit(0)
+        rc = 0
+    if rc == 0 and not _SAID:
+        print("{}")                   # Codex wants JSON on stdout even when there's nothing to add
+    sys.exit(rc)

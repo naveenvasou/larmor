@@ -1,6 +1,6 @@
 ---
 name: larmor
-description: "Voice conversation with the user through the Larmor MCP server. Use when the user asks for voice mode, starts speaking to you, or invokes /larmor. Turns the agent into a conversational voice partner — short spoken replies, work narrated aloud, detail on the terminal."
+description: "Voice conversation with the user through the Larmor MCP server. Use when the user asks for voice mode, starts speaking to you, or invokes /larmor or $larmor. Turns the agent into a conversational voice partner — short spoken replies, work narrated aloud, detail on the terminal."
 ---
 
 # Larmor — talk with the user while you work
@@ -8,10 +8,10 @@ description: "Voice conversation with the user through the Larmor MCP server. Us
 ## FIRST RUN — set yourself up before using these tools
 
 If the `larmor` MCP tools (`speak`, `listen`, `start_voice`) are **not** available to you, Larmor
-isn't installed. From the Larmor repo, run `./install.sh` (or `./install.sh claude|gemini|codex`),
-then tell the user to restart the agent. The installer sets up the Python environment, a menu-bar
-app that runs the local speech engine at login, the MCP server, and (Claude Code) the hooks that
-keep a voice turn from ending without listening and scope voice mode to one session.
+isn't installed. Tell the user to run `curl -fsSL https://larmor.dev/install.sh | bash` and then
+open a new session. The installer sets up the Python environment, a menu-bar app that runs the
+local speech engine at login, the MCP server for every agent it finds, and (Claude Code, Codex)
+the hooks that keep a voice turn from ending without listening and scope voice mode to one session.
 
 Everything runs on the Mac: Parakeet for speech-to-text, Chatterbox for the voice, Apple's echo
 canceller for talking over it. The first launch downloads about 3.7 GB of models; until the
@@ -29,8 +29,9 @@ speak(reply) → listen() → think/work → speak(reply) → listen() → …
 end_voice()                                      ← when they're done
 ```
 
-**Call `start_voice()` first.** While it's on, a Stop hook will refuse to let you end a turn
-without listening — so a forgotten `listen()` can't silently kill the conversation. **Never end a
+**Call `start_voice()` first.** In agents with Larmor's hooks (Claude Code, Codex), a Stop hook
+then refuses to let you end a turn without listening, so a forgotten `listen()` can't silently kill
+the conversation. Elsewhere nothing will catch it, so the rule below is all there is. **Never end a
 turn without calling `listen()`.** The user is still there; if you stop listening, they're talking
 to nothing and get no error.
 
@@ -82,10 +83,13 @@ When a request needs real work (reading files, editing, running things):
 
 ## Speech that arrives mid-work
 
-In Claude Code, what the user says while you're working doesn't wait for `listen()`. After your
-next tool call it arrives as added context starting with **[Larmor] While you were working, the
-user said**. Treat it exactly like a turn from `listen()`: `speak()` a short acknowledgement and
-act on it. It will not be returned by `listen()` again.
+What the user says while you're working doesn't wait for `listen()`. It comes back in the result
+of your next `speak()` call, starting with **[Larmor] While you were working, the user said**. In
+Claude Code and Codex it can also arrive sooner, as added context after any tool call. Treat it
+exactly like a turn from `listen()`: `speak()` a short acknowledgement and act on it. It will not be
+returned by `listen()` again.
+
+This is one more reason to narrate long work: every progress beat is also a chance to hear them.
 
 ## Interruptions
 
