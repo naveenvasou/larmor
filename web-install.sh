@@ -6,8 +6,10 @@ set -euo pipefail
 BASE="${LARMOR_BASE:-https://larmor.dev}"
 DEST="${LARMOR_DIR:-$HOME/.larmor/app}"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-echo "→ downloading Larmor"
-curl -fsSL "$BASE/larmor.tar.gz" -o "$tmp/larmor.tar.gz"
+t0=$(date +%s)
+curl -fsSL "$BASE/larmor.tar.gz" -o "$tmp/larmor.tar.gz" || { echo "Couldn't download Larmor from $BASE. Check your connection and try again." >&2; exit 1; }
 mkdir -p "$DEST"
 tar -xzf "$tmp/larmor.tar.gz" -C "$DEST"        # updates in place; keeps the Python env
+s=$(( $(date +%s) - t0 )); [ "$s" -ge 1 ] && LARMOR_FETCHED="${s}s" || LARMOR_FETCHED=" "
+export LARMOR_FETCHED
 exec "$DEST/install.sh" "$@"
