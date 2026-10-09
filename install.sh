@@ -3,7 +3,7 @@
 #
 #   ./install.sh                 # runtime + menu-bar app + the agents you pick from those it finds
 #   LARMOR_AGENTS=claude,codex   # pick without being asked
-#   ./install.sh claude          # same, but only wire Claude Code (or codex|gemini|antigravity)
+#   ./install.sh claude          # same, but only wire Claude Code (or desktop|codex|gemini|antigravity)
 #   ./install.sh --no-agents     # runtime + menu-bar app, leave agent configs alone
 #   ./install.sh --uninstall     # stop the app and remove the login item (agent configs stay)
 #   ./install.sh --print         # the MCP config, for any other agent; installs nothing
@@ -186,8 +186,11 @@ uninstall() {
 # get the Stop and mid-work hooks. Anything else that speaks MCP works from --print.
 
 AGENTS_SKILLS="$HOME/.agents/skills"   # the shared skills folder Codex and Gemini CLI read
+DESKTOP_DIR="$HOME/Library/Application Support/Claude"
+ALL_AGENTS="claude desktop codex gemini antigravity"
 
 has_claude()      { command -v claude >/dev/null; }
+has_desktop()     { [ -d /Applications/Claude.app ] || [ -d ~/Applications/Claude.app ] || [ -d "$DESKTOP_DIR" ]; }
 has_codex()       { command -v codex >/dev/null; }
 has_gemini()      { command -v gemini >/dev/null; }
 has_antigravity() { command -v agy >/dev/null || [ -d ~/.gemini/antigravity-cli ] || [ -d ~/.gemini/config ]; }
@@ -204,7 +207,8 @@ import json, os, sys
 p, py, d = sys.argv[1:]
 p = os.path.expanduser(p)
 try: c = json.load(open(p))
-except Exception: c = {}
+except FileNotFoundError: c = {}
+except ValueError: sys.exit(f"{p} isn't valid JSON, so Larmor left it alone.")
 h = c.setdefault("hooks", {})
 def add(event, name, entry):
     lst = h.setdefault(event, [])
@@ -230,7 +234,8 @@ import json, os, sys
 p, py, server = sys.argv[1:]
 p = os.path.expanduser(p)
 try: c = json.load(open(p))
-except Exception: c = {}
+except FileNotFoundError: c = {}
+except ValueError: sys.exit(f"{p} isn't valid JSON, so Larmor left it alone.")
 c.setdefault("mcpServers", {})["larmor"] = {"command": py, "args": [server]}
 os.makedirs(os.path.dirname(p), exist_ok=True)
 json.dump(c, open(p, "w"), indent=2)
@@ -244,6 +249,15 @@ install_claude() {
   put_skill ~/.claude/skills
   _hooks ~/.claude/settings.json
   say "Claude Code: voice tools, /larmor skill, hooks"
+}
+
+install_desktop() {
+  has_desktop || { say "Claude Desktop: not found, skipping"; return; }
+  local f="$DESKTOP_DIR/claude_desktop_config.json"
+  [ -f "$f" ] && [ ! -f "$f.bak-larmor" ] && cp "$f" "$f.bak-larmor"
+  # Desktop has no hooks and no skills folder: the speaking rules arrive with the MCP server.
+  _json_mcp "$f" || { say "Claude Desktop: its config isn't valid JSON, left it alone"; return 0; }
+  say "Claude Desktop: voice tools (quit and reopen it to load them)"
 }
 
 install_codex() {
@@ -349,7 +363,7 @@ get_email() {
 
 agent_name() {
   case "$1" in
-    claude) echo "Claude Code" ;; codex) echo "Codex" ;;
+    claude) echo "Claude Code" ;; desktop) echo "Claude Desktop" ;; codex) echo "Codex" ;;
     gemini) echo "Gemini CLI" ;;  antigravity) echo "Antigravity" ;;
   esac
 }
@@ -431,7 +445,7 @@ pick_agents() {  # ids...  -> sets AGENTS
 choose_agents() {
   local found=() id
   printf '\n  %sYour agents%s\n' "$B" "$X"
-  for id in claude codex gemini antigravity; do "has_$id" && found+=("$id"); done
+  for id in $ALL_AGENTS; do "has_$id" && found+=("$id"); done
   case "$target" in
     --no-agents) AGENTS="" ;;
     all)
@@ -447,12 +461,12 @@ choose_agents() {
     *) AGENTS="$target" ;;
   esac
   for id in $AGENTS; do
-    case "$id" in claude|codex|gemini|antigravity) ;; *) die "Unknown agent \"$id\". Pick from: claude, codex, gemini, antigravity." ;; esac
+    case " $ALL_AGENTS " in *" $id "*) ;; *) die "Unknown agent \"$id\". Pick from: ${ALL_AGENTS// /, }." ;; esac
   done
   if [ ${#found[@]} -eq 0 ] && [ "$target" = all ]; then
     printf '  %s·%s No coding agents found. Any agent with MCP can use Larmor: see the end.\n' "$D" "$X"
   else
-    for id in claude codex gemini antigravity; do
+    for id in $ALL_AGENTS; do
       case " $AGENTS " in
         *" $id "*) ok "$(agent_name "$id")" ;;
         *) case " ${found[*]:-} " in *" $id "*) printf '  %s·%s %s %sskipped%s\n' "$D" "$X" "$(agent_name "$id")" "$D" "$X" ;; esac ;;
@@ -581,9 +595,10 @@ finish() {
   num; printf 'Open a new session in your agent and start voice mode:\n'
   for id in $AGENTS; do
     case "$id" in
-      claude) printf '       %-13s %s/larmor%s\n' "Claude Code" "$B" "$X" ;;
-      codex)  printf '       %-13s %s$larmor%s\n' "Codex" "$B" "$X" ;;
-      *)      printf '       %-13s say "voice mode"\n' "$(agent_name "$id")" ;;
+      claude)  printf '       %-15s %s/larmor%s\n' "Claude Code" "$B" "$X" ;;
+      desktop) printf '       %-15s quit and reopen it, then say "voice mode"\n' "Claude Desktop" ;;
+      codex)   printf '       %-15s %s$larmor%s\n' "Codex" "$B" "$X" ;;
+      *)       printf '       %-15s say "voice mode"\n' "$(agent_name "$id")" ;;
     esac
   done
   if [ -n "$AGENTS" ]; then
@@ -592,7 +607,7 @@ finish() {
     printf '       %sFor any agent with MCP, add the output of%s\n' "$D" "$X"
   fi
   printf '       %s~/.larmor/app/install.sh --print to its MCP settings, then say "voice mode".%s\n' "$D" "$X"
-  num; printf 'When macOS asks for microphone access for your terminal, allow it.\n\n'
+  num; printf 'When macOS asks for microphone access, allow it.\n\n'
   printf '  %sHeadphones or speakers both work, and you can talk over it.%s\n' "$D" "$X"
   case " $AGENTS " in *" codex "*) printf '  %sIn Codex, run /hooks once and trust Larmor'\''s hooks.%s\n' "$D" "$X" ;; esac
   printf '  %sNo icon? A full menu bar hides it: hold ⌘ and drag other icons away.%s\n' "$D" "$X"
@@ -604,8 +619,8 @@ main() {
   case "$target" in
     --print)     json_config; exit 0 ;;
     --uninstall) uninstall; exit 0 ;;
-    all|claude|gemini|antigravity|codex|--no-agents) ;;
-    *) die "usage: $0 [claude|gemini|antigravity|codex|--no-agents|--uninstall|--print]" ;;
+    all|claude|desktop|gemini|antigravity|codex|--no-agents) ;;
+    *) die "usage: $0 [claude|desktop|codex|gemini|antigravity|--no-agents|--uninstall|--print]" ;;
   esac
   trap '[ "$FANCY" = 1 ] && printf "\033[?25h"; stty echo </dev/tty 2>/dev/null || true' EXIT
   mkdir -p "$HOME/.larmor"; : > "$LOG"

@@ -2,8 +2,8 @@
 
 Talk to your coding agent, and have it talk back while it works.
 
-Larmor gives any agent that speaks MCP a voice and ears: Claude Code, Codex, Gemini CLI,
-Antigravity, or anything else that can add an MCP server. You can talk over it and it stops; say
+Larmor gives any agent that speaks MCP a voice and ears: Claude Code, Claude Desktop, Codex,
+Gemini CLI, Antigravity, or anything else that can add an MCP server. You can talk over it and it stops; say
 "mm-hmm" and it carries on. What you say while it's busy editing files reaches it mid-task.
 Everything runs on your Mac. No audio leaves it, and there are no API keys.
 
@@ -35,6 +35,7 @@ macOS asks your terminal for microphone access.
 Open a new session in your agent:
 
 - **Claude Code:** type `/larmor`
+- **Claude Desktop:** quit and reopen it (⌘Q), then ask for "voice mode" in a new chat
 - **Codex:** type `$larmor`. Run `/hooks` once and trust Larmor's hooks.
 - **Anything else:** ask it for "voice mode"
 
@@ -50,11 +51,13 @@ to its MCP settings.
 | `~/.cache/huggingface/hub/` | The voice models (Parakeet, Chatterbox) |
 | `~/.local/bin/uv` | [uv](https://github.com/astral-sh/uv), only if you don't have it already |
 | Claude Code | `claude mcp add larmor -s user`, the skill in `~/.claude/skills/larmor`, hooks in `~/.claude/settings.json` |
+| Claude Desktop | `mcpServers.larmor` in `~/Library/Application Support/Claude/claude_desktop_config.json` (backed up once to `claude_desktop_config.json.bak-larmor`) |
 | Codex | A `[mcp_servers.larmor]` block in `~/.codex/config.toml` (backed up once to `config.toml.bak-larmor`), hooks in `~/.codex/hooks.json`, the skill in `~/.agents/skills/larmor` |
 | Gemini CLI | `mcpServers.larmor` in `~/.gemini/settings.json`, the skill in `~/.agents/skills/larmor` |
 | Antigravity | `mcpServers.larmor` in `~/.gemini/config/mcp_config.json`, the skill in `~/.gemini/skills/larmor` |
 
 Only the agents you pick are touched, and only Larmor's own entries in their config files.
+A config file that isn't valid JSON is left alone.
 
 The hooks are small Python scripts in [`hooks/`](hooks). One keeps a voice turn from ending
 without listening, one records which session turned voice mode on, and one hands the agent
