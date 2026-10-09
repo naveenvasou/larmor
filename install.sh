@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Larmor — talk to your terminal coding agent. One command sets up everything:
 #
-#   ./install.sh                 # runtime + menu-bar app + every agent it finds
+#   ./install.sh                 # runtime + menu-bar app + the agents you pick from those it finds
+#   LARMOR_AGENTS=claude,codex   # pick without being asked
 #   ./install.sh claude          # same, but only wire Claude Code (or codex|gemini|antigravity)
 #   ./install.sh --no-agents     # runtime + menu-bar app, leave agent configs alone
 #   ./install.sh --uninstall     # stop the app and remove the login item (agent configs stay)
@@ -342,34 +343,258 @@ get_email() {
   fi
 }
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── which agents ──────────────────────────────────────────────────────────────
+# Find the agents on this Mac and let the user pick which ones get Larmor. Asked up
+# front with the email, so the long part of the install runs without questions.
 
-wire_agents() {
-  case "$target" in
-    all) install_claude; install_codex; install_gemini; install_antigravity ;;
-    *)   "install_$target" ;;
+agent_name() {
+  case "$1" in
+    claude) echo "Claude Code" ;; codex) echo "Codex" ;;
+    gemini) echo "Gemini CLI" ;;  antigravity) echo "Antigravity" ;;
   esac
 }
 
+names_of() {  # "claude codex" -> "Claude Code and Codex"
+  local out="" n=0 total=$# id
+  for id in "$@"; do
+    n=$((n + 1))
+    if [ "$n" -eq 1 ]; then out="$(agent_name "$id")"
+    elif [ "$n" -eq "$total" ]; then out="$out and $(agent_name "$id")"
+    else out="$out, $(agent_name "$id")"; fi
+  done
+  printf '%s' "$out"
+}
+
+read_key() {  # one keypress from the terminal: up, down, space, enter, a, 1-9, or other
+  local k rest
+  IFS= read -rsn1 k </dev/tty || { echo quit; return; }
+  case "$k" in
+    $'\033') IFS= read -rsn2 -t 1 rest </dev/tty || true
+             case "$rest" in '[A') echo up ;; '[B') echo down ;; *) echo other ;; esac ;;
+    "") echo enter ;;
+    " ") echo space ;;
+    k) echo up ;; j) echo down ;;
+    a|A) echo all ;;
+    [1-9]) echo "$k" ;;
+    *) echo other ;;
+  esac
+}
+
+# Arrow keys and space on a real terminal; a typed list of numbers otherwise.
+pick_agents() {  # ids...  -> sets AGENTS
+  local ids=("$@") n=$# sel=() cur=0 i key mark ptr line
+  for ((i = 0; i < n; i++)); do sel[i]=1; done
+  printf '  Which agents should get Larmor?\n' >/dev/tty
+  if [ "$FANCY" = 1 ]; then
+    printf '  %s↑↓ move · space select · enter confirm%s\n' "$D" "$X" >/dev/tty
+    printf '\033[?25l' >/dev/tty
+    stty -echo </dev/tty 2>/dev/null || true       # a key pressed early can't print over the menu
+    while :; do
+      for ((i = 0; i < n; i++)); do
+        if [ "${sel[i]}" = 1 ]; then mark="${G}◉${X}"; else mark="${D}◯${X}"; fi
+        if [ "$i" = "$cur" ]; then ptr="${E}❯${X}"; line="${B}$(agent_name "${ids[i]}")${X}"
+        else ptr=" "; line="$(agent_name "${ids[i]}")"; fi
+        printf '\r\033[K  %s %s %s\n' "$ptr" "$mark" "$line" >/dev/tty
+      done
+      key="$(read_key)"
+      case "$key" in
+        up)    cur=$(( (cur + n - 1) % n )) ;;
+        down)  cur=$(( (cur + 1) % n )) ;;
+        space) sel[cur]=$(( 1 - sel[cur] )) ;;
+        all)   local any=0; for ((i = 0; i < n; i++)); do [ "${sel[i]}" = 0 ] && any=1; done
+               for ((i = 0; i < n; i++)); do sel[i]=$any; done ;;
+        [1-9]) [ "$key" -le "$n" ] && sel[key-1]=$(( 1 - sel[key-1] )) ;;
+        enter) break ;;
+        quit)  printf '\033[?25h' >/dev/tty; die "Cancelled." ;;
+      esac
+      printf '\033[%dA' "$n" >/dev/tty
+    done
+    printf '\033[%dA\033[2A\033[J\033[?25h' "$n" >/dev/tty   # fold the menu away
+    stty echo </dev/tty 2>/dev/null || true
+  else
+    for ((i = 0; i < n; i++)); do printf '    %d) %s\n' $((i + 1)) "$(agent_name "${ids[i]}")" >/dev/tty; done
+    printf '  Numbers to install for, separated by spaces (enter for all): ' >/dev/tty
+    IFS= read -r line </dev/tty || die "Cancelled."
+    if [ -n "${line// /}" ]; then
+      for ((i = 0; i < n; i++)); do sel[i]=0; done
+      for key in $line; do
+        case "$key" in *[!0-9]*|"") continue ;; esac
+        [ "$key" -ge 1 ] && [ "$key" -le "$n" ] && sel[key-1]=1
+      done
+    fi
+  fi
+  AGENTS=""
+  for ((i = 0; i < n; i++)); do [ "${sel[i]}" = 1 ] && AGENTS="$AGENTS ${ids[i]}"; done
+  AGENTS="${AGENTS# }"
+}
+
+choose_agents() {
+  local found=() id
+  printf '\n  %sYour agents%s\n' "$B" "$X"
+  for id in claude codex gemini antigravity; do "has_$id" && found+=("$id"); done
+  case "$target" in
+    --no-agents) AGENTS="" ;;
+    all)
+      if [ -n "${LARMOR_AGENTS:-}" ]; then
+        AGENTS="$(printf '%s' "$LARMOR_AGENTS" | tr ',' ' ')"
+      elif [ ${#found[@]} -eq 0 ]; then
+        AGENTS=""
+      elif (: </dev/tty) 2>/dev/null; then
+        pick_agents "${found[@]}"
+      else
+        AGENTS="${found[*]}"                     # nobody to ask: every agent we found
+      fi ;;
+    *) AGENTS="$target" ;;
+  esac
+  for id in $AGENTS; do
+    case "$id" in claude|codex|gemini|antigravity) ;; *) die "Unknown agent \"$id\". Pick from: claude, codex, gemini, antigravity." ;; esac
+  done
+  if [ ${#found[@]} -eq 0 ] && [ "$target" = all ]; then
+    printf '  %s·%s No coding agents found. Any agent with MCP can use Larmor: see the end.\n' "$D" "$X"
+  else
+    for id in claude codex gemini antigravity; do
+      case " $AGENTS " in
+        *" $id "*) ok "$(agent_name "$id")" ;;
+        *) case " ${found[*]:-} " in *" $id "*) printf '  %s·%s %s %sskipped%s\n' "$D" "$X" "$(agent_name "$id")" "$D" "$X" ;; esac ;;
+      esac
+    done
+  fi
+  printf '\n'
+}
+
+wire_agents() {
+  local id
+  for id in $AGENTS; do "install_$id"; done
+}
+
+# ── models ──────────────────────────────────────────────────────────────────────
+
+# The menu-bar app starts fetching the models the moment it launches. Follow it here
+# with a progress bar, so "installed" means ready to talk. Ctrl-C leaves it running in
+# the background. On a pipe (an agent running us) don't wait: the icon shows progress.
+follow_models() {
+  MODELS_READY=0
+  if [ "$FANCY" != 1 ]; then
+    say "  → The voice models (about 3.7 GB) download in the background; the menu-bar icon shows progress."
+    return 0
+  fi
+  if "$PY" - "$G" "$D" "$R" "$X" "${LARMOR_ENGINE_URL:-http://127.0.0.1:8160}" <<'PYEOF'
+import json, shutil, sys, time, urllib.request
+G, D, R, X, ENGINE = sys.argv[1:6]
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+W = 20                                           # bar width
+out = sys.stdout
+
+
+def health():
+    try:
+        with urllib.request.urlopen(f"{ENGINE}/health", timeout=2) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def took(t0):
+    s = int(time.time() - t0)
+    return f"{s // 60}m {s % 60:02d}s" if s >= 60 else (f"{s}s" if s >= 1 else "")
+
+
+def show(spin, label, parts=()):
+    """One status line that always fits the terminal: drop the least useful parts first."""
+    cols = shutil.get_terminal_size((80, 24)).columns - 1
+    parts = list(parts)
+    while True:
+        plain = f"  {spin} {label} " + " · ".join(p[1] for p in parts)
+        if len(plain) <= cols or not parts:
+            break
+        parts.pop()
+    rich = " · ".join(p[0] for p in parts)
+    out.write(f"\r\033[K  {G}{spin}{X} {label} {rich}")
+    out.flush()
+
+
+t0 = time.time(); seen = time.time(); h = None; polled = 0.0; hist = []; i = 0
+out.write("\033[?25l")
+try:
+    while True:
+        now = time.time()
+        if now - polled >= 0.5:
+            h, polled = health(), now
+            if h is not None:
+                seen = now
+        spin = SPIN[i % len(SPIN)]; i += 1
+        st = (h or {}).get("state")
+        if h is None and now - seen > 90:
+            out.write(f"\r\033[K  {R}✗{X} The voice engine didn't start. The menu-bar icon has details.\n")
+            sys.exit(4)
+        if st == "ready":
+            out.write(f"\r\033[K  {G}✓{X} Voice models ready {D}{took(t0)}{X}\n")
+            sys.exit(0)
+        if st == "error":
+            out.write(f"\r\033[K  {R}✗{X} The voice models didn't load: {h.get('detail', '')}\n"
+                      f"    {D}The menu-bar icon has details, and Send feedback if it stays stuck.{X}\n")
+            sys.exit(4)
+        if st == "downloading" and h.get("total_mb"):
+            have, total = h.get("downloaded_mb", 0), h["total_mb"]
+            if not hist or hist[-1][1] != have:
+                hist.append((now, have))
+            hist = [p for p in hist if now - p[0] <= 10]
+            rate = (hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) if len(hist) > 1 else 0
+            frac = min(have / total, 1.0) if total else 0
+            fill = int(frac * W)
+            bar = f"{G}{'━' * fill}{X}{D}{'─' * (W - fill)}{X}"
+            gb = f"{have / 1000:.1f} of {total / 1000:.1f} GB"
+            parts = [(f"{bar} {int(frac * 100)}%", "─" * W + " 100%"), (f"{D}{gb}{X}", gb)]
+            if rate > 0.5:
+                left = (total - have) / rate
+                eta = f"about {int(left // 60) + 1} min left" if left >= 60 else f"{int(left) + 1}s left"
+                parts.append((f"{D}{eta}{X}", eta))
+            show(spin, "Checking the voice models" if have >= total else "Downloading the voice models", parts)
+        elif st in ("downloading", "loading"):
+            show(spin, "Loading the voice models", [(f"{D}{took(t0)}{X}", took(t0))])
+        else:
+            show(spin, "Starting the voice engine", [(f"{D}{took(t0)}{X}", took(t0))])
+        time.sleep(0.1)
+except KeyboardInterrupt:
+    out.write(f"\r\033[K  {D}·{X} Still downloading in the background. The menu-bar icon shows the progress.\n")
+    sys.exit(3)
+finally:
+    out.write("\033[?25h")
+    out.flush()
+PYEOF
+  then MODELS_READY=1; fi
+  return 0
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
 finish() {
-  local n=0
-  printf '\n  %sLarmor is installed.%s\n\n' "$B" "$X"
-  printf '  %s1%s  The menu-bar icon is fetching the voice models (about 3.7 GB, first time\n' "$E" "$X"
-  printf '     only). When it turns into a plain waveform, you'\''re ready.\n'
-  printf '  %s2%s  Open a new session in your agent and start voice mode:\n' "$E" "$X"
-  if has_claude; then printf '       %-13s %s/larmor%s\n' "Claude Code" "$B" "$X"; n=1; fi
-  if has_codex; then printf '       %-13s %s$larmor%s\n' "Codex" "$B" "$X"; n=1; fi
-  if has_gemini; then printf '       %-13s say "voice mode"\n' "Gemini CLI"; n=1; fi
-  if has_antigravity; then printf '       %-13s say "voice mode"\n' "Antigravity"; n=1; fi
-  if [ "$n" = 1 ]; then
+  local k=0 id
+  num() { k=$((k + 1)); printf '  %s%d%s  ' "$E" "$k" "$X"; }
+  if [ "$MODELS_READY" = 1 ]; then
+    printf '\n  %sLarmor is ready.%s\n\n' "$B" "$X"
+  else
+    printf '\n  %sLarmor is installed.%s\n\n' "$B" "$X"
+    num; printf 'The menu-bar icon is still fetching the voice models (about 3.7 GB,\n'
+    printf '     first time only). When it turns into a plain waveform, you'\''re ready.\n'
+  fi
+  num; printf 'Open a new session in your agent and start voice mode:\n'
+  for id in $AGENTS; do
+    case "$id" in
+      claude) printf '       %-13s %s/larmor%s\n' "Claude Code" "$B" "$X" ;;
+      codex)  printf '       %-13s %s$larmor%s\n' "Codex" "$B" "$X" ;;
+      *)      printf '       %-13s say "voice mode"\n' "$(agent_name "$id")" ;;
+    esac
+  done
+  if [ -n "$AGENTS" ]; then
     printf '       %sAny other agent with MCP: add the output of%s\n' "$D" "$X"
   else
     printf '       %sFor any agent with MCP, add the output of%s\n' "$D" "$X"
   fi
   printf '       %s~/.larmor/app/install.sh --print to its MCP settings, then say "voice mode".%s\n' "$D" "$X"
-  printf '  %s3%s  When macOS asks for microphone access for your terminal, allow it.\n\n' "$E" "$X"
+  num; printf 'When macOS asks for microphone access for your terminal, allow it.\n\n'
   printf '  %sHeadphones or speakers both work, and you can talk over it.%s\n' "$D" "$X"
-  if has_codex; then printf '  %sIn Codex, run /hooks once and trust Larmor'\''s hooks.%s\n' "$D" "$X"; fi
+  case " $AGENTS " in *" codex "*) printf '  %sIn Codex, run /hooks once and trust Larmor'\''s hooks.%s\n' "$D" "$X" ;; esac
   printf '  %sNo icon? A full menu bar hides it: hold ⌘ and drag other icons away.%s\n' "$D" "$X"
   printf '  %sSomething off? Menu-bar icon → Send feedback.%s\n\n' "$D" "$X"
 }
@@ -382,12 +607,13 @@ main() {
     all|claude|gemini|antigravity|codex|--no-agents) ;;
     *) die "usage: $0 [claude|gemini|antigravity|codex|--no-agents|--uninstall|--print]" ;;
   esac
-  trap '[ "$FANCY" = 1 ] && printf "\033[?25h"' EXIT
+  trap '[ "$FANCY" = 1 ] && printf "\033[?25h"; stty echo </dev/tty 2>/dev/null || true' EXIT
   mkdir -p "$HOME/.larmor"; : > "$LOG"
   banner
   check_mac
   get_email
-  printf '\n  %sInstalling%s\n' "$B" "$X"
+  choose_agents
+  printf '  %sInstalling%s\n' "$B" "$X"
   if [ -n "${LARMOR_FETCHED:-}" ]; then ok "Downloaded Larmor" "$LARMOR_FETCHED"; fi
   if ! command -v uv >/dev/null; then
     step "Installing uv, the Python package manager" install_uv
@@ -395,9 +621,11 @@ main() {
   fi
   step "Setting up Python and the speech libraries (about 800 MB)" install_runtime
   step "Adding the menu-bar app (starts at login)" install_app
-  if [ "$target" != --no-agents ]; then
-    STEP_SHOW=1 step "Connecting your coding agents" wire_agents
+  if [ -n "$AGENTS" ]; then
+    # shellcheck disable=SC2086
+    STEP_SHOW=1 step "Connecting $(names_of $AGENTS)" wire_agents
   fi
+  follow_models
   finish
 }
 
