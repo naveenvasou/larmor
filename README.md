@@ -85,6 +85,8 @@ downloading the installer, Python packages and the models.
   within seconds.
 - **One session at a time:** voice mode belongs to the session that turned it on. Your other
   terminals behave normally.
+- **Lets go of the mic:** voice mode switches itself off after 10 minutes without the agent
+  using it, or 20 minutes of nobody speaking, so a forgotten chat can't keep your mic open.
 
 The audio front end is a small Swift program, [`native/larmor_audio.swift`](native/larmor_audio.swift).
 The repo ships it prebuilt; to build it yourself:

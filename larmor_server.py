@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +43,16 @@ POLL_S = 0.02                       # 20 ms: the transport should never be the b
 # without end_voice(), and a lock would then block every other agent forever. The
 # owner renews it on every listen(); a stale lease is free for the taking.
 LEASE_S = float(os.getenv("LARMOR_LEASE_S", "90"))
+# Voice mode also has to let go of the mic on its own. While it's on, the ear keeps the
+# mic open through Apple's echo canceller, which turns down every other app's audio
+# whenever it hears speech. Two ways a session gets abandoned with voice still on:
+#   - the agent stops calling the tools at all (a Claude Desktop chat that was left;
+#     no Stop hook there to keep it listening): no speak()/listen() for IDLE_OFF_S;
+#   - the agent keeps calling listen() but nobody has spoken for SILENCE_OFF_S.
+IDLE_OFF_S = float(os.getenv("LARMOR_IDLE_OFF_S", "600"))
+SILENCE_OFF_S = float(os.getenv("LARMOR_SILENCE_OFF_S", "1200"))
+AUTO_OFF_NOTE = ("voice mode switched itself off: {why}, so Larmor let go of the microphone. "
+                 "Don't call listen() again. If the user wants to talk, call start_voice().")
 
 # Sent to every MCP client at connect, so any agent gets the speaking rules even where
 # the larmor skill isn't installed. The skill (skills/larmor/SKILL.md) is the long form.
@@ -67,6 +78,21 @@ mcp = MCPServer("larmor", instructions=INSTRUCTIONS)
 OWNER = os.getpid()                 # each agent spawns its own server, so the pid identifies it
 _state = {"cursor": None, "buffered": [], "was_away": False}
 _ear = {"proc": None}
+_calls = {"in_flight": 0, "last": 0.0, "heard": 0.0, "off_why": None, "watch": None}
+_calls_lock = threading.Lock()
+
+
+class _call:
+    """Counts a voice tool call as activity for the idle watch, for its whole duration."""
+    def __enter__(self):
+        with _calls_lock:
+            _calls["in_flight"] += 1
+            _calls["last"] = time.time()
+
+    def __exit__(self, *exc):
+        with _calls_lock:
+            _calls["in_flight"] -= 1
+            _calls["last"] = time.time()
 
 
 def _metric(kind: str, **fields) -> None:
@@ -162,6 +188,13 @@ def listen(timeout_s: float = 300.0) -> str:
     order. Returns "(silence)" on timeout. Call speak() first if you owe the
     user a reply; call listen() again right after to keep the conversation.
     """
+    if _calls["off_why"] and not _ear_alive():
+        return AUTO_OFF_NOTE.format(why=_calls["off_why"])
+    with _call():
+        return _listen(timeout_s)
+
+
+def _listen(timeout_s: float) -> str:
     t_call = time.time()
     if not _owns_mic():
         _state["buffered"].clear()
@@ -186,7 +219,12 @@ def listen(timeout_s: float = 300.0) -> str:
             break
         time.sleep(POLL_S)
     if not turns:
+        # the heard hook delivers mid-work speech too; delivered_until covers both paths
+        if _ear_alive() and time.time() - max(_calls["heard"], _delivered()) > SILENCE_OFF_S:
+            _auto_off(f"nobody has spoken for {int(SILENCE_OFF_S // 60)} minutes")
+            return AUTO_OFF_NOTE.format(why=_calls["off_why"])
         return "(silence)"
+    _calls["heard"] = time.time()
     _mark_delivered(max(t["t_user_end"] for t in turns))
     t_ret = time.time()
     for t in turns:
@@ -231,6 +269,25 @@ def _stop_ear() -> None:
     _ear["proc"] = None
 
 
+def _auto_off(why: str) -> None:
+    """end_voice() on the agent's behalf; only flips the session if it's still ours."""
+    if _read_session().get("owner") == OWNER:
+        SESSION.write_text(json.dumps({"on": False, "since": time.time()}))
+    _stop_ear()
+    _calls["off_why"] = why
+    _metric("voice_auto_off", why=why)
+
+
+def _idle_watch() -> None:
+    while _ear_alive():
+        time.sleep(min(5.0, IDLE_OFF_S / 4))
+        with _calls_lock:
+            idle = _calls["in_flight"] == 0 and time.time() - _calls["last"] > IDLE_OFF_S
+        if idle and _ear_alive():
+            _auto_off(f"there was no speak() or listen() call for {int(IDLE_OFF_S // 60)} minutes")
+            return
+
+
 @mcp.tool()
 def speak(text: str) -> str:
     """Say a line to the user. Returns immediately (~10ms) while audio plays.
@@ -239,7 +296,14 @@ def speak(text: str) -> str:
     the voice. Never speak markdown, code, or file paths.
     """
     if not _ear_alive():
+        if _calls["off_why"]:
+            return AUTO_OFF_NOTE.format(why=_calls["off_why"])
         return "voice mode is off: call start_voice() first"
+    with _call():
+        return _speak(text)
+
+
+def _speak(text: str) -> str:
     try:
         r = requests.post(f"http://127.0.0.1:{_ear_port()}/say", json={"text": text}, timeout=5)
     except Exception as e:  # noqa: BLE001
@@ -264,6 +328,7 @@ def _heard_while_working() -> str:
     _state["buffered"] = []
     if not turns:
         return ""
+    _calls["heard"] = time.time()
     _mark_delivered(max(t["t_user_end"] for t in turns))
     _metric("heard_on_speak", n=len(turns))
     quoted = "\n".join(f'  "{t["text"]}"' for t in turns)
@@ -305,6 +370,11 @@ def start_voice() -> str:
     _skip_turns()
     _state["was_away"] = False
     _start_ear()
+    with _calls_lock:
+        _calls.update(last=now, heard=now, off_why=None)
+    if _calls["watch"] is None or not _calls["watch"].is_alive():
+        _calls["watch"] = threading.Thread(target=_idle_watch, daemon=True)
+        _calls["watch"].start()
     _metric("voice_start")
     return "voice mode ON — end every turn with listen(); call end_voice() to exit"
 
@@ -314,6 +384,7 @@ def end_voice() -> str:
     """Leave voice mode. Call when the user says stop / that's all / exit voice."""
     SESSION.write_text(json.dumps({"on": False, "since": time.time()}))
     _stop_ear()
+    _calls["off_why"] = None
     _metric("voice_end")
     return "voice mode OFF"
 
