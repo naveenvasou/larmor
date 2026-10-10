@@ -26,8 +26,8 @@ git clone https://github.com/naveenvasou/larmor.git ~/.larmor/app
 ~/.larmor/app/install.sh
 ```
 
-The installer asks for your email, finds the agents on your Mac and lets you pick which ones get
-Larmor, then downloads about 3.7 GB of models with a progress bar. The first time you use it,
+The installer asks for an email (optional, Enter skips it), finds the agents on your Mac and lets
+you pick which ones get Larmor, then downloads about 3.7 GB of models with a progress bar. The first time you use it,
 macOS asks your terminal for microphone access.
 
 ## Start talking
@@ -65,7 +65,8 @@ anything you said while it was working. They do nothing in sessions where voice 
 
 ## What leaves your Mac
 
-- **Your email**, once, at install. It's how you hear about updates while Larmor is in beta.
+- **Your email**, once, at install, only if you leave one. It's how you hear about updates while
+  Larmor is in beta.
 - **Feedback**, only if you type it into "Send feedback…" in the menu bar.
 
 Both go to one small endpoint whose entire code is [`backend/signup.py`](backend/signup.py).

@@ -305,9 +305,9 @@ install_antigravity() {
 }
 
 # ── email ─────────────────────────────────────────────────────────────────────
-# Required: it's how a beta user hears about updates and the end of the beta. Asked
-# first, so nobody sits through the install and then gets stopped. curl | bash hands us
-# the script on stdin, so the question goes to the terminal itself.
+# Optional: it's how a beta user hears about updates and fixes. Asked first, so the long
+# part of the install runs without questions. curl | bash hands us the script on stdin,
+# so the question goes to the terminal itself. No terminal (an agent running us): skip it.
 
 EMAIL_RE='^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]{2,}$'
 
@@ -329,21 +329,25 @@ get_email() {
   fi
   if [ -z "$email" ]; then
     if ! (: </dev/tty) 2>/dev/null; then
-      die "Larmor needs an email to install, and there's no terminal to ask in. Run it like this:
-      curl -fsSL https://larmor.dev/install.sh | LARMOR_EMAIL=you@example.com bash"
+      ok "No email" "(nobody to ask; add LARMOR_EMAIL=you@example.com to hear about updates)"
+      return
     fi
-    printf '  Larmor is free while it'\''s in beta. Your email is how you hear about\n' >/dev/tty
-    printf '  updates and when the beta ends. It'\''s the only thing Larmor collects.\n\n' >/dev/tty
+    printf '  Larmor is free while it'\''s in beta. Leave your email to hear about updates\n' >/dev/tty
+    printf '  and fixes, or press Enter to skip. It'\''s the only thing Larmor collects.\n\n' >/dev/tty
     while :; do
-      printf '  %s›%s Email: ' "$E" "$X" >/dev/tty
+      printf '  %s›%s Email %s(optional)%s: ' "$E" "$X" "$D" "$X" >/dev/tty
       IFS= read -r email </dev/tty || die "Cancelled."
       email="$(printf '%s' "$email" | tr -d '[:space:]')"
-      valid_email "$email" && break
+      if [ -z "$email" ] || valid_email "$email"; then break; fi
       tries=$((tries + 1))
-      [ "$tries" -ge 3 ] && die "That doesn't look like an email. Run the command again when you're ready."
-      printf '    %sThat doesn'\''t look like an email. Try again.%s\n' "$D" "$X" >/dev/tty
+      if [ "$tries" -ge 3 ]; then email=""; break; fi
+      printf '    %sThat doesn'\''t look like an email. Try again, or press Enter to skip.%s\n' "$D" "$X" >/dev/tty
     done
     printf '\n' >/dev/tty
+    if [ -z "$email" ]; then
+      ok "No email" "(skipped; nothing is sent)"
+      return
+    fi
   elif ! valid_email "$email"; then
     die "LARMOR_EMAIL doesn't look like an email: $email"
   fi
