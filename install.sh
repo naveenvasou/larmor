@@ -121,8 +121,8 @@ check_mac() {
   else
     ok "$(printf '%-30s' "$mem_gb GB memory")" "uses about 3 GB while it runs"
   fi
-  [ "$free_gb" -ge 6 ] || die "Larmor needs about 5 GB of disk for its voice models. This Mac has $free_gb GB free."
-  ok "$(printf '%-30s' "$free_gb GB free disk")" "needs about 5 GB for the voice models"
+  [ "$free_gb" -ge 6 ] || die "Larmor needs 6 GB of free disk; it uses about 4.5 GB. This Mac has $free_gb GB free."
+  ok "$(printf '%-30s' "$free_gb GB free disk")" "uses about 4.5 GB: 3.7 GB of voice models, plus Python"
   printf '\n'
 }
 
