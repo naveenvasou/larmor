@@ -4,14 +4,18 @@ The menu-bar app starts, watches and restarts it; the ear (larmor_ear.py) calls 
 
     POST /transcribe      raw 16 kHz mono int16 PCM  -> {"text", "ms", "audio_s"}
     POST /warm            no-op once loaded (kept for the ear's startup call)
-    POST /speak_to_file   {"text", "path"}           -> writes a 24 kHz mono WAV
+    POST /speak           {"text"} (application/json) -> 24 kHz mono WAV bytes
     GET  /health          {"state": downloading|loading|ready|error, "progress", ...}
+
+Only local programs may call it. Anything a browser sends (an Origin or Sec-Fetch-Site
+header, or someone else's Host after DNS rebinding) is refused, so a web page can't use it.
 
 First run downloads the models (about 3 GB) and /health reports the progress.
 
     python engine/larmor_engine.py            # port 8160, or LARMOR_ENGINE_PORT
 """
 import asyncio
+import io
 import os
 import queue
 import threading
@@ -141,7 +145,7 @@ def tts_worker():
     loaded["tts"].set()
     log(f"tts {TTS_MODEL} ready in {time.time() - t:.1f}s, {sr} Hz")
     while True:
-        text, path, fut, loop = tts_jobs.get()
+        text, fut, loop = tts_jobs.get()
         try:
             parts = [np.asarray(r.audio, dtype=np.float32).reshape(-1) for r in model.generate(text=text)]
             a = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
@@ -151,12 +155,13 @@ def tts_worker():
             fade = min(int(0.02 * sr), a.size)
             if fade > 1:
                 a[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
-            with wave.open(path, "wb") as w:
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
                 w.setframerate(sr)
                 w.writeframes((a * 32767).astype(np.int16).tobytes())
-            loop.call_soon_threadsafe(fut.set_result, len(a) / sr)
+            loop.call_soon_threadsafe(fut.set_result, (buf.getvalue(), len(a) / sr))
         except Exception as e:  # noqa: BLE001
             loop.call_soon_threadsafe(fut.set_exception, e)
 
@@ -179,6 +184,19 @@ def boot():
 
 # ── http ──────────────────────────────────────────────────────────────────────
 
+LOCAL_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+
+
+@web.middleware
+async def local_only(req: web.Request, handler):
+    """The ear and the menu-bar app are the only callers, and neither is a browser.
+    Browsers send Origin on every cross-site POST (no-cors included) and Sec-Fetch-Site
+    on modern requests; a DNS-rebinding page arrives with its own Host."""
+    if req.headers.get("Origin") or req.headers.get("Sec-Fetch-Site") or req.host not in LOCAL_HOSTS:
+        return web.json_response({"error": "local programs only"}, status=403)
+    return await handler(req)
+
+
 async def _submit(q: queue.Queue, ev: threading.Event, *args):
     if not ev.is_set():
         raise web.HTTPServiceUnavailable(text=f"engine {STATE['state']}")
@@ -200,20 +218,22 @@ async def transcribe(req: web.Request):
     return web.json_response(out)
 
 
-async def speak_to_file(req: web.Request):
+async def speak(req: web.Request):
+    if req.content_type != "application/json":
+        return web.json_response({"error": "send application/json"}, status=415)
     body = await req.json()
-    text, path = (body.get("text") or "").strip(), (body.get("path") or "").strip()
-    if not text or not path:
-        return web.json_response({"error": "need text and path"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "need text"}, status=400)
     t = time.time()
     try:
-        dur = await _submit(tts_jobs, loaded["tts"], text, path)
+        wav, dur = await _submit(tts_jobs, loaded["tts"], text)
     except web.HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
         return web.json_response({"error": str(e)}, status=500)
-    return web.json_response({"ok": True, "path": path, "audio_s": round(dur, 2),
-                              "elapsed": round(time.time() - t, 3)})
+    return web.Response(body=wav, content_type="audio/wav",
+                        headers={"X-Audio-S": f"{dur:.2f}", "X-Elapsed": f"{time.time() - t:.3f}"})
 
 
 async def warm(_):
@@ -243,10 +263,10 @@ def watch_parent():
 def main():
     threading.Thread(target=boot, daemon=True, name="boot").start()
     threading.Thread(target=watch_parent, daemon=True, name="parent").start()
-    app = web.Application(client_max_size=64 * 1024 ** 2)
+    app = web.Application(client_max_size=64 * 1024 ** 2, middlewares=[local_only])
     app.router.add_post("/transcribe", transcribe)
     app.router.add_post("/warm", warm)
-    app.router.add_post("/speak_to_file", speak_to_file)
+    app.router.add_post("/speak", speak)
     app.router.add_get("/health", health)
     web.run_app(app, host="127.0.0.1", port=PORT,
                 print=lambda *_: log(f"listening on 127.0.0.1:{PORT}"))

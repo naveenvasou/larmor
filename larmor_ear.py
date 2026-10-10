@@ -262,12 +262,12 @@ class Mouth:
         return was
 
     def _render(self, text: str) -> np.ndarray | None:
-        path = f"/tmp/larmor_say_{os.getpid()}_{time.time_ns()}.wav"
         try:
-            r = requests.post(f"{ENGINE}/speak_to_file", json={"text": text, "path": path}, timeout=60)
+            r = requests.post(f"{ENGINE}/speak", json={"text": text}, timeout=60)
             r.raise_for_status()
+            import io
             import wave
-            with wave.open(path, "rb") as w:
+            with wave.open(io.BytesIO(r.content), "rb") as w:
                 sr, ch = w.getframerate(), w.getnchannels()
                 x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
             if ch > 1:
@@ -277,11 +277,6 @@ class Mouth:
         except Exception as e:
             log("tts failed:", e)
             return None
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
 
     def _render_loop(self):
         while True:
@@ -337,13 +332,25 @@ class Control(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _local(self) -> bool:
+        """Only Larmor's MCP server calls this. Refuse anything a browser sends."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site") or host not in ("127.0.0.1", "localhost"):
+            self._send({"error": "local programs only"}, 403)
+            return False
+        return True
+
     def do_GET(self):
+        if not self._local():
+            return
         if self.path == "/state":
             self._send({"speaking": self.mouth.speaking, "queued": self.mouth.lines.qsize()})
         else:
             self._send({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._local():
+            return
         n = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(n) or b"{}")
         if self.path == "/say":
